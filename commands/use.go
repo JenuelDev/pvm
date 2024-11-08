@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -57,79 +56,63 @@ func Use(args []string) {
 		log.Fatalln(err)
 	}
 
-	// transform to easily sortable slice
-	var availableVersions []versionMeta
-	for i, version := range versions {
-		availableVersions = append(availableVersions, versionMeta{
-			number: common.GetVersion(version.Name()),
-			folder: versions[i],
-		})
-	}
-
-	// check if version exists
 	var selectedVersion *versionMeta
-	for _, version := range availableVersions {
-		if version.number.Major+"."+version.number.Minor+"."+version.number.Patch == args[0] {
-			if threadSafe && !strings.Contains(version.folder.Name(), "nts") {
-				selectedVersion = &versionMeta{
-					number: version.number,
-					folder: version.folder,
-				}
-			} else if !threadSafe && strings.Contains(version.folder.Name(), "nts") {
-				selectedVersion = &versionMeta{
-					number: version.number,
-					folder: version.folder,
-				}
+	// loop over all found installed versions
+	for i, version := range versions {
+		safe := true
+		if strings.Contains(version.Name(), "nts") || strings.Contains(version.Name(), "NTS") {
+			safe = false
+		}
+		foundVersion := common.GetVersion(version.Name(), safe, "")
+		if threadSafe == foundVersion.ThreadSafe && strings.HasPrefix(foundVersion.String(), args[0]) {
+			selectedVersion = &versionMeta{
+				number: foundVersion,
+				folder: versions[i],
 			}
 		}
 	}
 
-	// if patch version is not specified, use the newest matching major.minor
 	if selectedVersion == nil {
-		// Sort by newest patch first
-		availableVersions = sortVersions(availableVersions)
-
-		for _, version := range availableVersions {
-			if version.number.Major+"."+version.number.Minor == args[0] {
-				if threadSafe && !strings.Contains(version.folder.Name(), "nts") {
-					selectedVersion = &versionMeta{
-						number: version.number,
-						folder: version.folder,
-					}
-				} else if !threadSafe && strings.Contains(version.folder.Name(), "nts") {
-					selectedVersion = &versionMeta{
-						number: version.number,
-						folder: version.folder,
-					}
-				}
-				break
-			}
-		}
-
-		if selectedVersion == nil {
-			theme.Error("The specified version is not installed.")
-			return
-		} else {
-			theme.Warning(fmt.Sprintf("No patch version specified, assumed newest patch version %s.", selectedVersion.number.String()))
-		}
+		theme.Error("The specified version is not installed.")
+		return
 	}
 
-	// remove old bat script
+	requestedVersion := common.GetVersion(args[0], threadSafe, "")
+	if requestedVersion.Minor == -1 {
+		theme.Warning(fmt.Sprintf("No minor version specified, assumed newest minor version %s.", selectedVersion.number.String()))
+	} else if requestedVersion.Patch == -1 {
+		theme.Warning(fmt.Sprintf("No patch version specified, assumed newest patch version %s.", selectedVersion.number.String()))
+	}
+
+	// remove old php bat script
 	batPath := filepath.Join(binPath, "php.bat")
 	if _, err := os.Stat(batPath); err == nil {
 		os.Remove(batPath)
 	}
 
-	// remove the old sh script
+	// remove the old php sh script
 	shPath := filepath.Join(binPath, "php")
 	if _, err := os.Stat(shPath); err == nil {
 		os.Remove(shPath)
 	}
 
+	// remove old php-cgi bat script
+	batPathCGI := filepath.Join(binPath, "php-cgi.bat")
+	if _, err := os.Stat(batPathCGI); err == nil {
+		os.Remove(batPathCGI)
+	}
+
+	// remove old php-cgi sh script
+	shPathCGI := filepath.Join(binPath, "php-cgi")
+	if _, err := os.Stat(shPathCGI); err == nil {
+		os.Remove(shPathCGI)
+	}
+
 	versionFolderPath := filepath.Join(homeDir, ".pvm", "versions", selectedVersion.folder.Name())
 	versionPath := filepath.Join(versionFolderPath, "php.exe")
+	versionPathCGI := filepath.Join(versionFolderPath, "php-cgi.exe")
 
-	// create bat script
+	// create bat script for php
 	batCommand := "@echo off \n"
 	batCommand = batCommand + "set filepath=\"" + versionPath + "\"\n"
 	batCommand = batCommand + "set arguments=%*\n"
@@ -141,12 +124,35 @@ func Use(args []string) {
 		log.Fatalln(err)
 	}
 
-	// create sh script
+	// create sh script for php
 	shCommand := "#!/bin/bash\n"
 	shCommand = shCommand + "filepath=\"" + versionPath + "\"\n"
 	shCommand = shCommand + "\"$filepath\" \"$@\""
 
 	err = os.WriteFile(shPath, []byte(shCommand), 0755)
+
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// create bat script for php-cgi
+	batCommandCGI := "@echo off \n"
+	batCommandCGI = batCommandCGI + "set filepath=\"" + versionPathCGI + "\"\n"
+	batCommandCGI = batCommandCGI + "set arguments=%*\n"
+	batCommandCGI = batCommandCGI + "%filepath% %arguments%\n"
+
+	err = os.WriteFile(batPathCGI, []byte(batCommandCGI), 0755)
+
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// create sh script for php-cgi
+	shCommandCGI := "#!/bin/bash\n"
+	shCommandCGI = shCommandCGI + "filepath=\"" + versionPathCGI + "\"\n"
+	shCommandCGI = shCommandCGI + "\"$filepath\" \"$@\""
+
+	err = os.WriteFile(shPathCGI, []byte(shCommandCGI), 0755)
 
 	if err != nil {
 		log.Fatalln(err)
@@ -178,28 +184,7 @@ func Use(args []string) {
 	}
 	// end of ext directory link creation
 
-	var threadSafeString string
-	if threadSafe {
-		threadSafeString = "non-thread safe"
-	} else {
-		threadSafeString = "thread safe"
-	}
-
-	theme.Success("Using PHP " + selectedVersion.number.String() + " " + threadSafeString)
-}
-
-func sortVersions(in []versionMeta) []versionMeta {
-	sort.Slice(in, func(i, j int) bool {
-		if in[i].number.Major != in[j].number.Major {
-			return in[i].number.Major > in[j].number.Major
-		}
-		if in[i].number.Minor != in[j].number.Minor {
-			return in[i].number.Minor > in[j].number.Minor
-		}
-		return in[i].number.Patch > in[j].number.Patch
-	})
-
-	return in
+	theme.Success(fmt.Sprintf("Using PHP %s", selectedVersion.number))
 }
 
 type versionMeta struct {
